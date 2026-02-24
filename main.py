@@ -232,3 +232,8 @@ async def get_schedule():
         except Exception as e:
             print("❌ Schedule error:", e)
             return SCHEDULE_CACHE["data"] or []
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
