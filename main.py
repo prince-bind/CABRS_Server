@@ -5,11 +5,9 @@ from typing import List
 import pandas as pd
 import pickle
 import os
-import httpx
 import random
-from datetime import datetime, timedelta
 
-app = FastAPI(title="CABRS AI: Matchup Engine v2.0")
+app = FastAPI(title="CABRS AI: Matchup Engine")
 
 app.add_middleware(
     CORSMiddleware,
