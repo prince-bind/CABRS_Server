@@ -47,15 +47,6 @@ except Exception as e:
     print(f"❌ Critical System Failure: {e}")
     df_over = None
 
-# Realistic Stats DB for Radar Chart
-BOWLER_PROFILE_DB = {
-    "JJ Bumrah": {"econ": 7.30, "sr": 18.5, "dot_pct": 45.2, "pressure_index": 9.8},
-    "Mohammed Shami": {"econ": 8.44, "sr": 17.0, "dot_pct": 46.1, "pressure_index": 8.5},
-    "Mohammed Siraj": {"econ": 8.55, "sr": 19.5, "dot_pct": 44.0, "pressure_index": 8.8},
-    "YS Chahal": {"econ": 7.67, "sr": 16.5, "dot_pct": 41.5, "pressure_index": 8.2},
-    "Rashid Khan": {"econ": 6.67, "sr": 17.0, "dot_pct": 47.8, "pressure_index": 9.5},
-}
-
 class MatchupRequest(BaseModel):
     venue: str
     striker: str
@@ -103,17 +94,10 @@ def get_best_bowlers(request: MatchupRequest):
             pred_wicket_prob = model_wicket.predict_proba(input_wicket)[0][1]
             
             final_score = float(pred_runs - (pred_wicket_prob * 6))
-            profile = BOWLER_PROFILE_DB.get(b_name, {"econ": 8.0, "sr": 18.0, "dot_pct": 40.0, "pressure_index": 7.5})
             
             results.append({
                 "bowler": b_name,
                 "predicted_score": round(final_score, 3),
-                "metrics": {
-                    "econ": int(max(40, 100 - ((profile.get("econ", 8.0) - 6.5) * 20))),
-                    "sr": int(max(40, 100 - ((profile.get("sr", 18.0) - 15.0) * 8.5))),
-                    "dot": int(max(40, ((profile.get("dot_pct", 40) - 35) * 4))),
-                    "pressure": int(profile.get("pressure_index", 7.5) * 10)
-                },
                 "ai_insights": [
                     f"Predicted Run Concession: {round(pred_runs, 2)}",
                     f"Wicket Probability: {round(pred_wicket_prob * 100, 1)}%"
@@ -149,90 +133,6 @@ async def get_player_bio(player_name: str):
         f"Data confirms {player_name} is a high-impact choice for creating dot-ball pressure in the current match phase."
     ]
     return {"bio": random.choice(insights)}
-
-
-from datetime import datetime, timedelta
-import httpx
-
-CRICKET_API_KEY = "3343abea-2de7-4f13-865c-8aa41398e2da"
-
-SCHEDULE_CACHE = {"data": None, "timestamp": None}
-CACHE_DURATION = timedelta(minutes=30)
-
-SERIES_ID = "f182390a-1144-42f2-95f2-95f2a890089e"
-
-
-@app.get("/get_world_cup_schedule")
-async def get_schedule():
-
-    # ✅ Serve cached data
-    if (
-        SCHEDULE_CACHE["data"] is not None
-        and datetime.now() - SCHEDULE_CACHE["timestamp"] < CACHE_DURATION
-    ):
-        print("⚡ Returning cached WC schedule")
-        return SCHEDULE_CACHE["data"]
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        try:
-            # ---------- TRY SERIES FIXTURES ----------
-            url = f"https://api.cricapi.com/v1/series_fixtures?apikey={CRICKET_API_KEY}&id={SERIES_ID}"
-            response = await client.get(url)
-            res_json = response.json()
-
-            # ❌ If invalid API → fallback
-            if res_json.get("status") == "failure":
-                print("⚠ series_fixtures blocked, using fallback")
-
-                fallback_url = f"https://api.cricapi.com/v1/currentMatches?apikey={CRICKET_API_KEY}&offset=0"
-                fallback_res = await client.get(fallback_url)
-                fallback_json = fallback_res.json()
-
-                all_matches = fallback_json.get("data", [])
-
-                # STRICT WORLD CUP FILTER
-                matches = []
-                for m in all_matches:
-                    name = m.get("name", "").lower()
-
-                    if (
-                        ("world cup" in name or "t20wc" in name or "icc t20")
-                        and "women" not in name
-                        and "u19" not in name
-                    ):
-                        matches.append(m)
-
-            else:
-                data_obj = res_json.get("data", {})
-                matches = (
-                    data_obj.get("matchList", [])
-                    if isinstance(data_obj, dict)
-                    else data_obj or []
-                )
-
-            # ---------- NORMALIZE TEAM DATA ----------
-            for match in matches:
-                team_info = match.get("teamInfo", [])
-                if len(team_info) >= 2:
-                    match["teams"] = [
-                        team_info[0].get("shortname", "TBC"),
-                        team_info[1].get("shortname", "TBC"),
-                    ]
-                else:
-                    match["teams"] = match.get("teams", ["TBC", "TBC"])
-
-            # ---------- CACHE ----------
-            SCHEDULE_CACHE["data"] = matches
-            SCHEDULE_CACHE["timestamp"] = datetime.now()
-
-            print(f"✅ Final WC Matches Count: {len(matches)}")
-
-            return matches
-
-        except Exception as e:
-            print("❌ Schedule error:", e)
-            return SCHEDULE_CACHE["data"] or []
-
 
 if __name__ == "__main__":
     import uvicorn
