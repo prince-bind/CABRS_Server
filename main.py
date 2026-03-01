@@ -45,6 +45,15 @@ except Exception as e:
     print(f"❌ Critical System Failure: {e}")
     df_over = None
 
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "data_loaded": df_over is not None,
+        "run_model_loaded": model_runs is not None if 'model_runs' in globals() else False,
+        "wicket_model_loaded": model_wicket is not None if 'model_wicket' in globals() else False
+    }
+
 class MatchupRequest(BaseModel):
     venue: str
     striker: str
@@ -62,37 +71,45 @@ def get_metadata():
         "bowlers": sorted(df_over['bowler'].unique().tolist())
     }
 
+def calculate_bowler_score(request: MatchupRequest, bowler_name: str):
+    phase = 1 if request.over <= 6 else 2 if request.over <= 15 else 3
+
+    row = {
+        'inning': request.inning,
+        'over': request.over - 1,
+        'phase': int(phase),
+        'bowler': bowler_name,
+        'striker': request.striker,
+        'non_striker': request.non_striker,
+        'venue': request.venue,
+        'bowler_avg_runs': bowler_avg.get(bowler_name, GLOBAL_MEAN),
+        'venue_avg_runs': venue_avg.get(request.venue, GLOBAL_MEAN),
+        'bowler_vs_striker_avg': vs_avg.get((bowler_name, request.striker), GLOBAL_MEAN)
+    }
+
+    input_df = pd.DataFrame([row])
+
+    input_runs = encoder_runs.transform(input_df)
+    pred_runs = model_runs.predict(input_runs)[0]
+
+    input_wicket = encoder_wicket.transform(input_df)
+    pred_wicket_prob = model_wicket.predict_proba(input_wicket)[0][1]
+
+    final_score = float(pred_runs - (pred_wicket_prob * 6))
+
+    return float(pred_runs), float(pred_wicket_prob), float(final_score)
+
 @app.post("/predict")
 def get_best_bowlers(request: MatchupRequest):
-    if df_over is None: raise HTTPException(status_code=500, detail="Engine Offline")
-    
-    phase = 1 if request.over <= 6 else 2 if request.over <= 15 else 3
+    if df_over is None:
+        raise HTTPException(status_code=500, detail="Engine Offline")
+
     results = []
-    
+
     for b_name in request.bowler_list:
         try:
-            row = {
-                'inning': request.inning,
-                'over': request.over - 1,
-                'phase': int(phase),
-                'bowler': b_name,
-                'striker': request.striker,
-                'non_striker': request.non_striker,
-                'venue': request.venue,
-                'bowler_avg_runs': bowler_avg.get(b_name, GLOBAL_MEAN),
-                'venue_avg_runs': venue_avg.get(request.venue, GLOBAL_MEAN),
-                'bowler_vs_striker_avg': vs_avg.get((b_name, request.striker), GLOBAL_MEAN)
-            }
-            input_df = pd.DataFrame([row])
+            pred_runs, pred_wicket_prob, final_score = calculate_bowler_score(request, b_name)
 
-            input_runs = encoder_runs.transform(input_df)
-            pred_runs = model_runs.predict(input_runs)[0]
-            
-            input_wicket = encoder_wicket.transform(input_df)
-            pred_wicket_prob = model_wicket.predict_proba(input_wicket)[0][1]
-            
-            final_score = float(pred_runs - (pred_wicket_prob * 6))
-            
             results.append({
                 "bowler": b_name,
                 "predicted_score": round(final_score, 3),
@@ -101,11 +118,16 @@ def get_best_bowlers(request: MatchupRequest):
                     f"Wicket Probability: {round(pred_wicket_prob * 100, 1)}%"
                 ]
             })
+
         except Exception as e:
             print(f"Prediction Error for {b_name}: {e}")
             continue
 
+    if not results:
+        raise HTTPException(status_code=400, detail="No valid bowlers provided")
+
     results.sort(key=lambda x: x["predicted_score"])
+
     confidence = 85
     if len(results) > 1:
         gap = abs(results[1]["predicted_score"] - results[0]["predicted_score"])
@@ -118,7 +140,50 @@ def get_best_bowlers(request: MatchupRequest):
         "predictions": results
     }
 
-# --- RANDOMIZED TACTICAL BIO ENGINE (REPLACED GEMINI) ---
+@app.post("/simulate_win_probability")
+def simulate_win_probability(request: MatchupRequest):
+    if df_over is None:
+        raise HTTPException(status_code=500, detail="Engine Offline")
+
+    simulation_results = []
+
+    for b_name in request.bowler_list:
+        try:
+            pred_runs, pred_wicket_prob, final_score = calculate_bowler_score(request, b_name)
+
+            # Convert numpy types to Python float
+            pred_runs = float(pred_runs)
+            pred_wicket_prob = float(pred_wicket_prob)
+
+            base_win_prob = 0.50
+
+            adjustment = (pred_wicket_prob * 0.15) - (pred_runs / 100)
+
+            new_win_prob = float(
+                min(0.99, max(0.01, base_win_prob + adjustment))
+            )
+
+            simulation_results.append({
+                "bowler": b_name,
+                "win_probability": round(new_win_prob * 100, 2),
+                "predicted_runs": round(pred_runs, 2),
+                "wicket_probability": round(pred_wicket_prob * 100, 2)
+            })
+
+        except Exception as e:
+            print("Win Simulation Error:", e)
+            continue
+
+    if not simulation_results:
+        raise HTTPException(status_code=400, detail="Simulation failed")
+
+    simulation_results.sort(key=lambda x: x["win_probability"], reverse=True)
+
+    return {
+        "status": "success",
+        "best_bowler": simulation_results[0]["bowler"],
+        "simulations": simulation_results
+    }
 
 @app.get("/get_player_bio/{player_name}")
 async def get_player_bio(player_name: str):
@@ -131,6 +196,83 @@ async def get_player_bio(player_name: str):
         f"Data confirms {player_name} is a high-impact choice for creating dot-ball pressure in the current match phase."
     ]
     return {"bio": random.choice(insights)}
+
+@app.post("/simulate_innings")
+def simulate_innings(request: MatchupRequest):
+    if df_over is None:
+        raise HTTPException(status_code=500, detail="Engine Offline")
+
+    total_runs = 0.0
+    total_wickets = 0
+    over_results = []
+
+    current_striker = request.striker
+    current_non_striker = request.non_striker
+
+    for over_number in range(request.over, 21):
+
+        best_bowler = None
+        best_score = float("inf")
+        best_runs = 0.0
+        best_wicket_prob = 0.0
+
+        for bowler in request.bowler_list:
+            try:
+                temp_request = MatchupRequest(
+                    venue=request.venue,
+                    striker=current_striker,
+                    non_striker=current_non_striker,
+                    over=over_number,
+                    inning=request.inning,
+                    bowler_list=request.bowler_list
+                )
+
+                pred_runs, pred_wicket_prob, final_score = calculate_bowler_score(
+                    temp_request, bowler
+                )
+
+                # FORCE conversion to Python float
+                pred_runs = float(pred_runs)
+                pred_wicket_prob = float(pred_wicket_prob)
+                final_score = float(final_score)
+
+                if final_score < best_score:
+                    best_score = final_score
+                    best_bowler = bowler
+                    best_runs = pred_runs
+                    best_wicket_prob = pred_wicket_prob
+
+            except Exception as e:
+                print("Innings Simulation Error:", e)
+                continue
+
+        if best_bowler is None:
+            break
+
+        # Add runs (ensure pure float)
+        total_runs += float(best_runs)
+
+        # Simulate wicket
+        if random.random() < float(best_wicket_prob):
+            total_wickets += 1
+            current_striker = "New Batter"
+            if total_wickets >= 10:
+                break
+
+        over_results.append({
+            "over": int(over_number),
+            "bowler": best_bowler,
+            "predicted_runs": round(float(best_runs), 2),
+            "wicket_probability": round(float(best_wicket_prob) * 100, 2)
+        })
+
+    return {
+        "status": "success",
+        "projected_total_runs": round(float(total_runs), 2),
+        "projected_wickets": int(total_wickets),
+        "overs_simulated": int(len(over_results)),
+        "over_breakdown": over_results
+    }
 
 if __name__ == "__main__":
     import uvicorn
